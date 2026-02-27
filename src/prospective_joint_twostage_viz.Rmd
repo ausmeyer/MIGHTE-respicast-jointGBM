@@ -1,0 +1,294 @@
+---
+title: "RespiCast Joint Two-Stage Prospective Forecasts"
+output:
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: scroll
+    theme: flatly
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(shiny)
+
+if (dir.exists("../forecasts/prospective/submission")) {
+  root_prefix <- ".."
+} else if (dir.exists("forecasts/prospective/submission")) {
+  root_prefix <- "."
+} else {
+  stop("Could not locate forecasts/prospective/submission")
+}
+
+sub_dir <- file.path(root_prefix, "forecasts/prospective/submission")
+data_file <- file.path(root_prefix, "data/processed/respicast_long_latest.csv")
+loc_file <- file.path(root_prefix, "RespiCast-SyndromicIndicators/supporting-files/locations_iso2_codes.csv")
+
+if (!file.exists(data_file)) {
+  stop("Canonical data file not found. Run run/run_weekly.sh first.")
+}
+
+truth_raw <- read_csv(data_file, show_col_types = FALSE) %>%
+  mutate(
+    truth_date = as.Date(truth_date),
+    location = as.character(location),
+    target = as.character(target),
+    value = as.numeric(value)
+  ) %>%
+  filter(!is.na(truth_date), !is.na(value))
+
+loc_map <- if (file.exists(loc_file)) {
+  read_csv(loc_file, show_col_types = FALSE) %>%
+    transmute(location = as.character(iso2_code), location_name = as.character(location_name))
+} else {
+  tibble(location = unique(truth_raw$location), location_name = unique(truth_raw$location))
+}
+
+scope_locations <- c("AT","BE","CZ","EE","FI","FR","GR","HU","IE","IS","LT","LU","MT","NL","NO","PL","RO")
+scope_map <- tibble(location = scope_locations) %>%
+  left_join(loc_map, by = "location") %>%
+  mutate(location_name = coalesce(location_name, location))
+scope_location_names <- scope_map$location_name
+
+if (!("location_name" %in% names(truth_raw))) {
+  truth_raw$location_name <- NA_character_
+}
+
+truth_raw <- truth_raw %>%
+  mutate(location_name = as.character(location_name)) %>%
+  left_join(loc_map, by = "location", suffix = c("", "_map")) %>%
+  mutate(location_name = coalesce(location_name, location_name_map, location)) %>%
+  select(-location_name_map)
+
+forecast_files <- list.files(
+  sub_dir,
+  pattern = "^[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\\.csv$",
+  full.names = TRUE
+)
+file_info <- file.info(forecast_files)
+file_mtime <- setNames(as.numeric(file_info$mtime), forecast_files)
+
+forecast_raw <- bind_rows(lapply(forecast_files, function(path) {
+  tryCatch({
+    file_origin_date <- as.Date(substr(basename(path), 1, 10))
+    read_csv(path, show_col_types = FALSE) %>%
+      mutate(
+        source_file = basename(path),
+        origin_date = file_origin_date,
+        target_end_date = as.Date(target_end_date),
+        location = as.character(location),
+        target = as.character(target),
+        horizon = as.integer(horizon),
+        output_type_id = as.numeric(output_type_id),
+        value = as.numeric(value),
+        file_mtime = file_mtime[[path]]
+      )
+  }, error = function(e) {
+    NULL
+  })
+})) %>%
+  filter(output_type == "quantile", horizon %in% 1:4) %>%
+  filter(!is.na(origin_date), !is.na(target_end_date), !is.na(value)) %>%
+  arrange(file_mtime) %>%
+  distinct(
+    target, origin_date, target_end_date, horizon, location, output_type, output_type_id,
+    .keep_all = TRUE
+  )
+
+if (nrow(forecast_raw) == 0) {
+  stop("No forecast files with quantiles found in forecasts/prospective/submission")
+}
+
+forecast_summary <- forecast_raw %>%
+  group_by(target, origin_date, location, horizon, target_end_date) %>%
+  summarise(
+    q025 = value[which.min(abs(output_type_id - 0.025))],
+    q25 = value[which.min(abs(output_type_id - 0.25))],
+    median = value[which.min(abs(output_type_id - 0.5))],
+    q75 = value[which.min(abs(output_type_id - 0.75))],
+    q975 = value[which.min(abs(output_type_id - 0.975))],
+    .groups = "drop"
+  ) %>%
+  mutate(
+    q025 = pmin(q025, q25, median, na.rm = TRUE),
+    q25 = pmin(q25, median, na.rm = TRUE),
+    q75 = pmax(q75, median, na.rm = TRUE),
+    q975 = pmax(q975, q75, median, na.rm = TRUE)
+  ) %>%
+  left_join(loc_map, by = "location") %>%
+  mutate(location_name = coalesce(location_name, location))
+
+target_choices <- sort(unique(forecast_summary$target))
+default_target <- target_choices[1]
+
+origin_choices_for_target <- function(tgt) {
+  dates <- forecast_summary %>% filter(target == tgt) %>% pull(origin_date) %>% unique() %>% sort(decreasing = TRUE)
+  as.character(dates)
+}
+
+location_choices_for_target <- function(tgt) {
+  scope_location_names
+}
+```
+
+Sidebar {.sidebar}
+-----------------------------------------------------------------------
+
+### Controls
+
+```{r}
+selectInput("target_sel", "Target", choices = target_choices, selected = default_target)
+
+fluidRow(
+  column(6, actionButton("prev_date", "<- Prev")),
+  column(6, actionButton("next_date", "Next ->"))
+)
+
+selectInput(
+  "origin_sel",
+  "Origin Date",
+  choices = origin_choices_for_target(default_target),
+  selected = origin_choices_for_target(default_target)[1]
+)
+
+selectizeInput(
+  "loc_sel",
+  "Locations",
+  choices = location_choices_for_target(default_target),
+  selected = location_choices_for_target(default_target),
+  multiple = TRUE,
+  options = list(placeholder = "Select locations")
+)
+
+observeEvent(input$target_sel, {
+  dates <- origin_choices_for_target(input$target_sel)
+  updateSelectInput(session, "origin_sel", choices = dates, selected = dates[1])
+
+  locs <- location_choices_for_target(input$target_sel)
+  updateSelectizeInput(
+    session,
+    "loc_sel",
+    choices = locs,
+    selected = locs,
+    server = TRUE
+  )
+})
+
+observeEvent(input$prev_date, {
+  dates <- origin_choices_for_target(input$target_sel)
+  cur <- input$origin_sel
+  idx <- which(dates == cur)
+  if (length(idx) == 1 && idx < length(dates)) {
+    updateSelectInput(session, "origin_sel", selected = dates[idx + 1])
+  }
+})
+
+observeEvent(input$next_date, {
+  dates <- origin_choices_for_target(input$target_sel)
+  cur <- input$origin_sel
+  idx <- which(dates == cur)
+  if (length(idx) == 1 && idx > 1) {
+    updateSelectInput(session, "origin_sel", selected = dates[idx - 1])
+  }
+})
+```
+
+### Summary
+
+```{r}
+renderPrint({
+  req(input$target_sel, input$origin_sel)
+  fc <- forecast_summary %>% filter(target == input$target_sel, origin_date == as.Date(input$origin_sel))
+  cat("Target:", input$target_sel, "\n")
+  cat("Origin date:", input$origin_sel, "\n")
+  cat("Locations in selected forecast:", n_distinct(fc$location), "\n")
+  cat("Forecast rows (summary table):", nrow(fc), "\n")
+  cat("Available origin dates for this target:", length(origin_choices_for_target(input$target_sel)), "\n")
+})
+```
+
+Row {data-height=750}
+-----------------------------------------------------------------------
+
+### Forecast vs Truth
+
+```{r}
+renderPlot({
+  req(input$target_sel, input$origin_sel)
+
+  loc_levels <- location_choices_for_target(input$target_sel)
+  if (!is.null(input$loc_sel) && length(input$loc_sel) > 0) {
+    loc_levels <- intersect(loc_levels, input$loc_sel)
+  }
+  req(length(loc_levels) > 0)
+
+  fc <- forecast_summary %>%
+    filter(target == input$target_sel, origin_date == as.Date(input$origin_sel))
+
+  fc <- fc %>%
+    filter(location_name %in% loc_levels) %>%
+    mutate(location_name = factor(location_name, levels = loc_levels))
+
+  truth <- truth_raw %>%
+    filter(target == input$target_sel)
+
+  truth <- truth %>%
+    filter(location_name %in% loc_levels) %>%
+    mutate(location_name = factor(location_name, levels = loc_levels))
+
+  origin_date <- as.Date(input$origin_sel)
+  truth <- truth %>% filter(truth_date >= (origin_date - 180))
+
+  n_loc <- length(loc_levels)
+  ncol_facets <- max(1, min(4, ceiling(sqrt(n_loc))))
+
+  panel_df <- tibble(
+    location_name = factor(loc_levels, levels = loc_levels),
+    x = as.Date(origin_date),
+    y = 0
+  )
+
+  ggplot() +
+    geom_blank(data = panel_df, aes(x = x, y = y)) +
+    geom_line(
+      data = truth,
+      aes(x = truth_date, y = value),
+      color = "black",
+      linewidth = 0.45
+    ) +
+    geom_ribbon(
+      data = fc,
+      aes(x = target_end_date, ymin = q025, ymax = q975),
+      fill = "#8AB6F9",
+      alpha = 0.25
+    ) +
+    geom_ribbon(
+      data = fc,
+      aes(x = target_end_date, ymin = q25, ymax = q75),
+      fill = "#3A7BD5",
+      alpha = 0.35
+    ) +
+    geom_line(
+      data = fc,
+      aes(x = target_end_date, y = median),
+      color = "#1F4E8C",
+      linewidth = 0.9
+    ) +
+    geom_vline(xintercept = as.numeric(origin_date), linetype = "dashed", color = "#BF360C") +
+    facet_wrap(~ location_name, scales = "free_y", ncol = ncol_facets, drop = FALSE) +
+    labs(
+      title = paste0(input$target_sel, " prospective forecasts (origin ", input$origin_sel, ")"),
+      subtitle = "Black: observed truth. Blue bands: forecast quantiles (horizons 1-4). Dashed line: origin date.",
+      x = "Date",
+      y = "Incidence"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      strip.text = element_text(face = "bold"),
+      panel.grid.minor = element_blank()
+    )
+})
+```
