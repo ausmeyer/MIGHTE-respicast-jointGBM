@@ -7,11 +7,16 @@ Prospective-only forecasting pipeline for European RespiCast ILI/ARI targets, ad
 - `run/`
   - `run_weekly.sh`: builds canonical data and generates weekly prospective forecasts for ILI + ARI.
   - `run_prospective.sh`: direct entrypoint to `src/forecast_prospective.py`.
+  - `run_backtest.sh`: rolling retrospective out-of-sample forecasts from 2025/26 season start.
+  - `eval_backtest.sh`: computes RespiCast-style backtest accuracy tables (WIS + AE).
   - `render_prospective_viz.sh`: renders the interactive dashboard HTML.
 - `src/`
   - `build_long_timeseries.py`: merges `latest-*` and snapshot files into one canonical long series.
   - `model_joint_twostage_eu.py`: joint two-stage pooled-horizon model (prospective mode).
   - `forecast_prospective.py`: orchestration for canonical data build + ILI/ARI forecast generation.
+  - `forecast_backtest.py`: rolling-origin retrospective orchestration.
+  - `eval_backtest.R`: RespiCast-style backtest scoring script.
+  - `eval_backtest.Rmd`: HTML workbook that renders compact retrospective evaluation tables.
   - `prospective_joint_twostage_viz.Rmd`: interactive visualization over all saved submissions.
 - `data/processed/`
   - `respicast_long_latest.csv`: canonical merged long-series input cache.
@@ -20,6 +25,10 @@ Prospective-only forecasting pipeline for European RespiCast ILI/ARI targets, ad
   - Re-running for the same reference date overwrites that same file.
 - `forecasts/prospective/raw/`
   - Optional duplicate raw output (only when `--save-raw` is set).
+- `forecasts/retrospective/submission/`
+  - Rolling backtest submission files (`YYYY-MM-DD-<model-id>.csv`).
+- `forecasts/retrospective/evaluation/`
+  - Backtest score tables in RespiCast model-evaluation style.
 
 ## Data precedence
 
@@ -38,12 +47,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ./run/run_weekly.sh
 ./run/render_prospective_viz.sh
+./run/run_backtest.sh
+./run/eval_backtest.sh
 ```
 
 `run_weekly.sh` forwards extra CLI flags to `src/forecast_prospective.py`, e.g.:
 
 ```bash
 ./run/run_weekly.sh --num-bags 20 --stage1-rounds 100 --stage2-rounds 80
+./run/run_backtest.sh --num-bags 20 --stage1-rounds 100 --stage2-rounds 80
 ```
 
 Default location scope is the 17-location ILI wide-file set:
@@ -51,6 +63,11 @@ Default location scope is the 17-location ILI wide-file set:
 
 Dashboard output:
 - `forecasts/prospective/viz/prospective_joint_twostage_viz.html`
+
+Backtest defaults:
+- Starts at origin date `2025-10-01` (first 2025/26-season origin in `forecasting_weeks.csv`).
+- For each origin, uses only data available through that origin's `horizon=0` `target_end_date`.
+- Produces horizons `1..4` strictly ahead of anchor week.
 
 ## Output format
 
@@ -78,3 +95,24 @@ The prospective model run is strict:
   (configurable with `--recent-weeks-required`).
 
 There is no persistence fallback.
+
+## Backtest Evaluation Output
+
+`run/eval_backtest.sh` writes:
+
+- `forecasts/retrospective/evaluation/tables/recent_per_horizon.csv`
+- `forecasts/retrospective/evaluation/tables/recent_overall.csv`
+- `forecasts/retrospective/evaluation/tables/season_per_horizon.csv`
+- `forecasts/retrospective/evaluation/tables/season_overall.csv`
+- `forecasts/retrospective/evaluation/tables/evaluation_metadata.csv`
+- `forecasts/retrospective/evaluation/eval_backtest.html`
+
+Table columns include:
+
+- `target`, `horizon` (for per-horizon tables), `team_id`, `model_id`, `model`
+- `mean_wis`, `mean_ae`
+- `mean_rel_wis_log2` (`log2(baseline / model)` against `respicast-quantileBaseline`)
+- `n_units`, `rank`
+
+If needed, row-level RespiCast-style scores can still be exported by running:
+`./run/eval_backtest.sh --write-row-level true`

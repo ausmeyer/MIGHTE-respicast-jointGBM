@@ -72,6 +72,8 @@ class RuntimeConfig:
     sigma_mode: str
     locations_subset: Optional[List[str]] = None
     recent_weeks_required: int = 4
+    anchor_date: Optional[pd.Timestamp] = None
+    origin_date: Optional[pd.Timestamp] = None
 
 
 def parse_lag_string(lag_str: str) -> List[int]:
@@ -94,7 +96,13 @@ def infer_flu_season(ts: pd.Timestamp) -> str:
     return f"{start_year}/{str(start_year + 1)[-2:]}"
 
 
-def _load_target_panel(data_file: Path, target: str, locations: Sequence[str]) -> pd.DataFrame:
+def _load_target_panel(
+    data_file: Path,
+    target: str,
+    locations: Sequence[str],
+    cutoff_date: Optional[pd.Timestamp] = None,
+    calendar_end_date: Optional[pd.Timestamp] = None,
+) -> pd.DataFrame:
     df = pd.read_csv(data_file)
     required = {"target", "location", "truth_date", "value"}
     missing = required.difference(df.columns)
@@ -107,6 +115,9 @@ def _load_target_panel(data_file: Path, target: str, locations: Sequence[str]) -
     df["value"] = pd.to_numeric(df["value"], errors="coerce")
     df = df.dropna(subset=["location", "truth_date", "value"])
     df = df[df["location"].isin(set(locations))].copy()
+    if cutoff_date is not None:
+        cutoff = pd.to_datetime(cutoff_date)
+        df = df[df["truth_date"] <= cutoff].copy()
 
     if df.empty:
         raise ValueError(f"No rows remain for target '{target}' after location filtering")
@@ -119,7 +130,8 @@ def _load_target_panel(data_file: Path, target: str, locations: Sequence[str]) -
     )
 
     # Weekly calendar grid (Sunday week-end dates in this hub).
-    all_dates = pd.date_range(df["truth_date"].min(), df["truth_date"].max(), freq="W-SUN")
+    cal_end = pd.to_datetime(calendar_end_date) if calendar_end_date is not None else df["truth_date"].max()
+    all_dates = pd.date_range(df["truth_date"].min(), cal_end, freq="W-SUN")
     grid = pd.MultiIndex.from_product([locations, all_dates], names=["location", "truth_date"]).to_frame(index=False)
     out = grid.merge(df, on=["location", "truth_date"], how="left")
     out = out.sort_values(["location", "truth_date"]).reset_index(drop=True)
@@ -419,8 +431,18 @@ def run_prospective(cfg: RuntimeConfig) -> pd.DataFrame:
     other_target = "ARI incidence" if cfg.target == "ILI incidence" else "ILI incidence"
 
     # Load full selected scope first, then keep only locations with recent truth.
-    target_df_all = _load_target_panel(cfg.data_file, cfg.target, locations)
-    anchor = pd.to_datetime(target_df_all[target_df_all["y"].notna()]["date"].max())
+    if cfg.anchor_date is not None:
+        anchor = pd.to_datetime(cfg.anchor_date)
+        target_df_all = _load_target_panel(
+            cfg.data_file,
+            cfg.target,
+            locations,
+            cutoff_date=anchor,
+            calendar_end_date=anchor,
+        )
+    else:
+        target_df_all = _load_target_panel(cfg.data_file, cfg.target, locations)
+        anchor = pd.to_datetime(target_df_all[target_df_all["y"].notna()]["date"].max())
     recency_cutoff = anchor - pd.Timedelta(weeks=int(cfg.recent_weeks_required))
 
     last_obs = (
@@ -446,9 +468,24 @@ def run_prospective(cfg: RuntimeConfig) -> pd.DataFrame:
             f"[{cfg.target}] no locations have truth in the last {cfg.recent_weeks_required} weeks"
         )
 
-    target_df = _load_target_panel(cfg.data_file, cfg.target, eligible_locations)
-    other_df = _load_target_panel(cfg.data_file, other_target, eligible_locations)
-    origin_date = resolve_origin_date(anchor, cfg.forecasting_weeks_file)
+    target_df = _load_target_panel(
+        cfg.data_file,
+        cfg.target,
+        eligible_locations,
+        cutoff_date=anchor,
+        calendar_end_date=anchor,
+    )
+    other_df = _load_target_panel(
+        cfg.data_file,
+        other_target,
+        eligible_locations,
+        cutoff_date=anchor,
+        calendar_end_date=anchor,
+    )
+    if cfg.origin_date is not None:
+        origin_date = pd.to_datetime(cfg.origin_date)
+    else:
+        origin_date = resolve_origin_date(anchor, cfg.forecasting_weeks_file)
 
     tgt_pivot = _pivot(target_df)
     oth_pivot = _pivot(other_df)
@@ -617,6 +654,8 @@ def build_config(args: argparse.Namespace) -> RuntimeConfig:
         target_mode=args.target_mode,
         sigma_mode=args.sigma_mode,
         recent_weeks_required=args.recent_weeks_required,
+        anchor_date=pd.to_datetime(args.anchor_date) if args.anchor_date else None,
+        origin_date=pd.to_datetime(args.origin_date) if args.origin_date else None,
     )
 
 
@@ -648,6 +687,8 @@ def make_parser() -> argparse.ArgumentParser:
         default=4,
         help="Only forecast locations with at least one observed truth in the last N weeks",
     )
+    p.add_argument("--anchor-date", default=None, help="Optional fixed anchor date (YYYY-MM-DD)")
+    p.add_argument("--origin-date", default=None, help="Optional fixed origin date (YYYY-MM-DD)")
     return p
 
 

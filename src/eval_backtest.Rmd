@@ -1,0 +1,132 @@
+---
+title: "RespiCast Backtest Evaluation"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_depth: 2
+    code_folding: hide
+params:
+  tables_dir: "forecasts/retrospective/evaluation/tables"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  comment = NA
+)
+
+library(dplyr)
+library(readr)
+library(knitr)
+library(DT)
+library(htmltools)
+
+tables_dir <- params$tables_dir
+if (!dir.exists(tables_dir) && dir.exists(file.path("..", tables_dir))) {
+  tables_dir <- file.path("..", tables_dir)
+}
+
+read_required <- function(path) {
+  if (!file.exists(path)) {
+    stop("Missing required file: ", path, ". Run ./run/eval_backtest.sh first.")
+  }
+  read_csv(path, show_col_types = FALSE)
+}
+
+meta <- read_required(file.path(tables_dir, "evaluation_metadata.csv"))
+recent_overall <- read_required(file.path(tables_dir, "recent_overall.csv"))
+recent_per_horizon <- read_required(file.path(tables_dir, "recent_per_horizon.csv"))
+season_overall <- read_required(file.path(tables_dir, "season_overall.csv"))
+season_per_horizon <- read_required(file.path(tables_dir, "season_per_horizon.csv"))
+
+fmt_tbl <- function(df) {
+  out <- df
+  num_cols <- names(out)[vapply(out, is.numeric, logical(1))]
+  for (nm in setdiff(num_cols, c("horizon", "n_units", "rank"))) {
+    out[[nm]] <- round(out[[nm]], 3)
+  }
+  pretty_names <- c(
+    horizon = "Horizon (weeks ahead)",
+    team_id = "Team",
+    model_id = "Model ID",
+    model = "Model",
+    mean_wis = "Mean WIS",
+    mean_ae = "Mean AE",
+    mean_rel_wis_log2 = "Mean Relative Skill (log2 baseline/model)",
+    n_units = "Scored Units",
+    rank = "Rank"
+  )
+  old_names <- names(out)
+  names(out) <- ifelse(old_names %in% names(pretty_names), pretty_names[old_names], old_names)
+  out
+}
+
+render_target_tables <- function(df, title_prefix) {
+  targets <- unique(df$target)
+  htmltools::tagList(lapply(targets, function(tgt) {
+    sub <- df %>% filter(target == tgt) %>% select(-target)
+    htmltools::tagList(
+      tags$h3(paste0(title_prefix, " - ", tgt)),
+      DT::datatable(
+        fmt_tbl(sub),
+        rownames = FALSE,
+        class = "stripe hover order-column compact",
+        options = list(
+          pageLength = 15,
+          autoWidth = TRUE,
+          scrollX = TRUE
+        )
+      )
+    )
+  }))
+}
+```
+
+Generated: `r format(Sys.time(), "%Y-%m-%d %H:%M:%S")`
+
+## Evaluation Window
+
+```{r metadata}
+meta_pretty <- meta %>%
+  rename(
+    `Backtest Start Origin Date` = start_origin_date,
+    `Last Evaluated Origin Date` = last_origin_date,
+    `Recent Window Start Date` = recent_start_date,
+    `Recent Window Length (weeks)` = recent_weeks,
+    `Baseline Model` = baseline_model,
+    `Total Scored Units` = n_scored_units
+  )
+knitr::kable(
+  meta_pretty,
+  format = "html",
+  align = "l",
+  table.attr = "class='table table-striped table-condensed'"
+)
+```
+
+## Season Overall
+
+```{r season-overall}
+render_target_tables(season_overall, "Season Overall")
+```
+
+## Recent Overall
+
+```{r recent-overall}
+render_target_tables(recent_overall, "Recent Overall")
+```
+
+## Season Per Horizon
+
+```{r season-per-horizon}
+render_target_tables(season_per_horizon, "Season Per Horizon")
+```
+
+## Recent Per Horizon
+
+```{r recent-per-horizon}
+render_target_tables(recent_per_horizon, "Recent Per Horizon")
+```
