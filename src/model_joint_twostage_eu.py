@@ -270,8 +270,9 @@ def build_features(
 def build_pooled_examples(feature_df: pd.DataFrame, max_horizons: int) -> pd.DataFrame:
     parts = []
     for h in range(1, max_horizons + 1):
-        # RespiCast convention here uses horizons 1..4 where h=1 maps to current anchor week.
-        shift_weeks = h - 1
+        # Forecast horizons are strictly ahead of the last observed anchor week.
+        # h=1 => anchor+1 week, ..., h=4 => anchor+4 weeks.
+        shift_weeks = h
         tmp = feature_df.copy()
         tmp["horizon"] = h
         tmp["target"] = tmp.groupby("location")["y"].shift(-shift_weeks)
@@ -393,7 +394,8 @@ def resolve_origin_date(anchor: pd.Timestamp, forecasting_weeks_file: Path) -> p
         if needed.issubset(fw.columns):
             fw["origin_date"] = pd.to_datetime(fw["origin_date"], errors="coerce")
             fw["target_end_date"] = pd.to_datetime(fw["target_end_date"], errors="coerce")
-            match = fw[(fw["horizon"] == 1) & (fw["target_end_date"] == anchor)]
+            # Anchor is the latest observed truth week, which corresponds to horizon 0.
+            match = fw[(fw["horizon"] == 0) & (fw["target_end_date"] == anchor)]
             if len(match):
                 return pd.to_datetime(match["origin_date"].max())
 
